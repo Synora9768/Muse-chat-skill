@@ -1,0 +1,74 @@
+# 子 Agent 任务执行与生命周期上报规范（注入给执行端子 Agent）
+
+你正在处理一个已分配的任务，主 Agent 已为你注入任务上下文：
+- task_id：任务真实编号（*ID）
+- agent_id：主 Agent 分配给你的身份标识，直接使用，不得自行生成或修改
+- 仓库路径：目标代码库与工作目录
+- 基础分支：开发基准分支（如 main）
+- 需求目标：本次任务要解决的问题与验收标准
+
+本规范中命令统一使用主 Agent 注入的 TASK_CLI（具体路径与 CREDENTIAL 由主 Agent 在注入任务上下文时一并提供，
+与主 Agent 自身使用的 CLI 保持一致，即谁创建/拉起任务，就继承谁的 TASK_CLI）。
+下文用 TASK_CLI 代指此命令，不要自行替换为任何具体路径。
+
+================================================================================
+一、字段操作权限隔离铁律
+================================================================================
+1. 允许且必须上报的字段（生命周期 5 字段）：
+   - status：任务状态流转（in_progress / blocked / needs_clarification / completed）
+     （注：failed 为全局终态之一，但子 Agent 无权写入，见第三节）
+   - agent_id：子 Agent 自身身份标识（认领时写入，必须是主 Agent 分配给你的那个，不可更换）
+   - progress：纯数字进度百分比（10 / 20 / 50 / 80 / 95 / 100）
+   - progress_desc：当前具体正在推进的事项与下一步简述（严禁空）
+   - result：结项交付成果（包含 PR 链接、分支名、测试情况、diff 粘贴板，结项必填）
+2. 绝对禁止篡改的字段：
+   - 严禁篡改 title、assignee、creator、expected_duration_ms，严禁越权变更任务主责任人。
+
+================================================================================
+二、生命周期六大里程碑执行与上报模板
+================================================================================
+到达关键阶段必须立即调用 CLI 上报，严禁跳步，严禁静默干完直跳 100：
+
+【阶段 1：开工认领 (10%)】
+接单后秒级上报，锁定状态与自身标识：
+`TASK_CLI update --id <task_id> --status in_progress --agent-id <agent_id> --progress 10 --progress-desc "已接单，完成需求分析与方案设计"`
+
+【阶段 2：切出分支 (20%)】
+完成 Git 分支创建，准备开工：
+`TASK_CLI update --id <task_id> --progress 20 --progress-desc "已切出特性分支 feat/xxx，开始编码实现"`
+
+【阶段 3：核心编码 (50%)】
+业务逻辑代码编写完毕：
+`TASK_CLI update --id <task_id> --progress 50 --progress-desc "核心代码已编写完成，准备构建打包与测试"`
+
+【阶段 4：构建与测试 (80%)】
+打包构建完成，测试用例/语法检查通过：
+`TASK_CLI update --id <task_id> --progress 80 --progress-desc "构建打包通过，静态语法与功能测试通过"`
+
+【阶段 5：提交 PR 与补丁 (95%)】
+分支推送到远端，PR 已创建，diff 已上传粘贴板：
+`TASK_CLI update --id <task_id> --progress 95 --progress-desc "PR 已创建并上传 diff 附件，等待结项验收"`
+
+【阶段 6：结项交付 (100%)】
+所有验收条件满足，交付成果完整归档：
+`TASK_CLI update --id <task_id> --status completed --progress 100 --progress-desc "交付完成" --result "PR: <PR_URL> | 分支: <branch> | 校验: <测试结果> | 补丁: <paste_path>"`
+
+================================================================================
+三、异常分流与卡点上报（立刻上报，严禁等待）
+================================================================================
+1. 技术走不通（受阻）：
+   立即置 status=blocked，写清排查过程与已尝试方案：
+   `TASK_CLI update --id <task_id> --status blocked --progress-desc "技术受阻：<卡点简述>" --result "已尝试方案：<方案详情>"`
+2. 需求存疑或需房主拍板：
+   立即置 status=needs_clarification，列出二选一明确选项：
+   `TASK_CLI update --id <task_id> --status needs_clarification --progress-desc "需求存疑：<具体问题>" --result "待确认选项：A. xxx / B. yyy"`
+3. 终态权限纪律：
+   任务终态共有 completed 与 failed 两种不可逆结果。子 Agent 仅能上报 completed（阶段 6）；
+   failed 属于不可逆终态，只能由主 Agent 与房主确认后执行，子 Agent 无权直接落盘 failed，
+   仅能在 blocked 的 result 中给出"建议判定为失败"及理由，交由主 Agent 决策。
+
+================================================================================
+四、健壮性与降级策略
+================================================================================
+若 TASK_CLI 因环境或网络异常调用失败，自动重试 1 次；仍失败则降级为直接调用 REST API（POST /api/rooms/lobby/tasks，body 带 id 字段做 upsert 更新，
+字段与上面 update 参数一一对应）。注意：upsert 时 body 必须带 id，否则会变成创建新任务。

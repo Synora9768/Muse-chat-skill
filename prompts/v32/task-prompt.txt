@@ -1,0 +1,65 @@
+## 创建任务（两段式 SOP）
+
+`<TASK_CLI> create --title "..." --assignee "..." --ref-msg-id <来源消息ID> --expected-duration-ms <预估毫秒>`
+
+- <TASK_CLI> 为各 bot 的任务 CLI（统一 `python3 ~/workspace/bot-chatroom/scripts/task.py`，BOT_CREDENTIAL 环境变量区分身份：Meta-Bot 设 custom.bot-chatroom，diaomao 用默认）
+  完整示例（Meta-Bot）：`BOT_CREDENTIAL=custom.bot-chatroom python3 ~/workspace/bot-chatroom/scripts/task.py create --title "..." --assignee Meta-Bot`
+- 接口：POST /api/rooms/lobby/tasks
+- 字段：title（必填）, description, assignee, agent-id, expected-duration-ms, ref-msg-id, ref-seq
+- --ref-msg-id 锚定来源消息（触发 409 互斥防抢单），--expected-duration-ms 填预估工期
+- 两段式：①群里秒回确认"已建账" ②创建成功后拿到真实任务 ID（*ID），在群里播报
+
+## 字段填写规则（assignee vs agent-id）
+
+- assignee：任务的承接责任方（主 Agent：diaomao/gemini/Meta-Bot），创建时必填；
+  注意：assignee 不是需求提出人，需求提出人是 creator（通常为 owner）；
+  创建后除主 Agent/房主确认变更外不得被子 Agent 篡改（见 subagent-task-prompt.txt）。
+- agent-id：实际执行该任务的 Agent 身份标识，创建任务时可留空，
+  由主 Agent 在拉起子 Agent 时统一分配（格式建议：`sub-<task_id>-<时间戳或随机串>`），
+  子 Agent 在「阶段 1：开工认领」时把分配到的 agent-id 写回任务，不得自行生造。
+- 一个任务 assignee 不变，但其 agent-id 可能随认领/转派变化。
+
+## 任务状态枚举（全局统一，三份文档均以此为准）
+
+pending（待认领）/ in_progress（进行中）/ completed（已完成）/
+blocked（受阻）/ needs_clarification（需澄清）/ failed（彻底失败，终态）/
+timeout（超时，服务端自动标记）/ cancelled（已取消）
+
+- failed 仅能由主 Agent 与房主确认后落盘，子 Agent 无权直接写入，
+  只能在 blocked 的 result 中给出"建议判定为失败"的说明。
+
+## 拉起子 Agent（衔接 model-loop-prompt.txt）
+
+任务创建成功、且判断需要子 Agent 执行时：
+1. 主 Agent 组装上下文：task_id、仓库路径、基础分支、需求目标
+2. 分配 agent-id（规则见上）
+3. 拉起子 Agent 进程，注入 subagent-task-prompt.txt + 上述上下文
+4. 子 Agent 在阶段 1 上报时把 agent-id 写回任务完成绑定
+
+## 异常处理（主 agent 职责）
+
+当任务状态变为 blocked（受阻）或 needs_clarification（需澄清）且归属人是你时：
+
+1. 排查根因：读任务的 progress_desc/result，了解卡在哪里、已试过什么方案
+2. 群内上报：在群里说明情况，@相关人（如需要决策，列出二选一选项供拍板）
+3. 接管或协调：能自己解决就接管；需要子 agent 配合就重新派单（重新分配 agent-id）
+
+日常进度更新（progress/progress_desc）是子 agent 的责任，见 subagent-task-prompt.txt。
+
+
+
+## 脚本路径关系（2026-10-06 PR#39：bin/ 已正式入仓）
+
+```
+bot-chatroom/bin/
+├── pull-loop.py      # 拉取（常驻，--bot 指定身份）
+├── classify.py       # 过滤（pull-loop 调用）
+├── msg-queue-v2.py   # 队列（bpop/ack-batch/mark-sent）
+└── wm-update.py      # 水位（带锁，原子更新）
+
+bot-chatroom/scripts/
+└── task.py           # 任务 CLI（BOT_CREDENTIAL 环境变量区分身份）
+```
+
+<TASK_CLI>  # = `BOT_CREDENTIAL=<你的> python3 ~/workspace/bot-chatroom/scripts/task.py`
+<API_CLI>   # = Meta-Bot 用 skill 的 bc.py，diaomao 用 br
